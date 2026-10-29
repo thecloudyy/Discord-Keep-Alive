@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""One-command setup for vc-keeper (no shell scripts required)."""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+VENV = ROOT / ".venv"
+ENV_FILE = ROOT / ".env"
+
+# httpx (used by the Rust toolchain downloader) chokes on IPv6 CIDR entries in
+# NO_PROXY, so sanitize it for the install subprocesses.
+INSTALL_ENV = os.environ.copy()
+INSTALL_ENV["NO_PROXY"] = "localhost,127.0.0.1,.local"
+INSTALL_ENV["no_proxy"] = INSTALL_ENV["NO_PROXY"]
+
+
+def run(*args: str) -> None:
+    print("+", " ".join(args))
+    subprocess.run(list(args), check=True, env=INSTALL_ENV, cwd=ROOT)
+
+
+def venv_python() -> Path:
+    if os.name == "nt":
+        return VENV / "Scripts" / "python.exe"
+    return VENV / "bin" / "python"
+
+
+def main() -> int:
+    if not VENV.exists():
+        print("[vc-keeper] creating virtual environment...")
+        run(sys.executable, "-m", "venv", str(VENV))
+
+    py = venv_python()
+    print("[vc-keeper] upgrading pip...")
+    run(str(py), "-m", "pip", "install", "--upgrade", "pip")
+
+    print("[vc-keeper] installing dependencies (this may take a few minutes)...")
+    run(str(py), "-m", "pip", "install", "-e", ".")
+
+    needs_setup = not ENV_FILE.exists()
+    if ENV_FILE.exists():
+        try:
+            content = ENV_FILE.read_text(encoding="utf-8")
+            if "DISCORD_TOKEN=" not in content or "DISCORD_TOKEN=\n" in content or "DISCORD_TOKEN=\r\n" in content:
+                # empty token -> treat as unconfigured
+                if "DISCORD_TOKEN=" in content:
+                    val = content.split("DISCORD_TOKEN=", 1)[1].splitlines()[0].strip()
+                    if not val:
+                        needs_setup = True
+        except OSError:
+            needs_setup = True
+
+    if needs_setup:
+        print("[vc-keeper] first run setup")
+        try:
+            token = input("discord token: ").strip()
+            guild = input("server (guild) id: ").strip()
+            channel = input("voice channel id: ").strip()
+        except EOFError:
+            token = guild = channel = ""
+        lines = [
+            f"DISCORD_TOKEN={token}",
+            f"DISCORD_GUILD_ID={guild}",
+            f"DISCORD_CHANNEL_ID={channel}",
+            "LOG_LEVEL=INFO",
+            "SELF_DEAF=false",
+            "REJOIN_COOLDOWN_MIN=10",
+            "REJOIN_COOLDOWN_MAX=120",
+        ]
+        ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[vc-keeper] wrote {ENV_FILE}")
+    else:
+        print(f"[vc-keeper] keeping existing {ENV_FILE}")
+
+    print()
+    print("[vc-keeper] install complete.")
+    if os.name == "nt":
+        print("run with: .\\.venv\\Scripts\\vc-keeper.exe")
+    else:
+        print("run with: ./.venv/bin/vc-keeper")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except subprocess.CalledProcessError as exc:
+        print(f"[vc-keeper] command failed with exit code {exc.returncode}", file=sys.stderr)
+        raise SystemExit(exc.returncode)
+    except KeyboardInterrupt:
+        print("\n[vc-keeper] cancelled", file=sys.stderr)
+        raise SystemExit(130)

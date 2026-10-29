@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Discord-Keep-Alive</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <div id="app" class="max-w-4xl mx-auto p-6 space-y-6">
+    <header class="flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <img v-if="profile.avatar_url" :src="profile.avatar_url" class="w-10 h-10 rounded-full" />
+        <div v-else class="w-10 h-10 rounded-full bg-slate-700"></div>
+        <div>
+          <h1 class="text-2xl font-bold">Discord-Keep-Alive</h1>
+          <p class="text-sm text-slate-400">{{ profile.global_name || profile.username || 'not logged in' }}</p>
+        </div>
+      </div>
+      <span class="text-sm" :class="running ? 'text-emerald-400' : 'text-slate-400'">
+        {{ running ? 'running' : 'stopped' }}
+      </span>
+    </header>
+
+    <!-- Account selection (forced first) -->
+    <section v-if="!accountSelected" class="bg-slate-900 rounded-xl p-6 space-y-4">
+      <h2 class="text-xl font-semibold">Select an account</h2>
+      <p class="text-slate-400 text-sm">Choose a detected Discord account to continue, or enter a token manually.</p>
+
+      <div v-if="tokens.length" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button v-for="t in tokens" :key="t.token"
+          @click="selectAccount(t)"
+          class="flex items-center gap-3 bg-slate-800 hover:bg-slate-700 rounded-lg p-3 text-left">
+          <img :src="t.avatar_url" class="w-12 h-12 rounded-full" />
+          <div>
+            <div class="font-semibold">{{ t.global_name || t.username }}</div>
+            <div class="text-xs text-slate-400">{{ t.client }} · {{ t.id }}</div>
+          </div>
+        </button>
+      </div>
+      <div v-else class="text-slate-400 text-sm">No accounts detected. Enter a token manually below.</div>
+
+      <div class="space-y-2">
+        <input v-model="manualToken" placeholder="Discord token" class="w-full bg-slate-800 rounded px-3 py-2 font-mono text-sm" />
+        <button @click="useManual" class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded">Use token</button>
+      </div>
+      <div class="flex gap-2">
+        <button @click="detect" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded">Detect accounts</button>
+      </div>
+    </section>
+
+    <!-- Dashboard -->
+    <template v-else>
+      <section class="bg-slate-900 rounded-xl p-4 space-y-3">
+        <h2 class="font-semibold">stay in a voice channel</h2>
+        <div class="grid grid-cols-2 gap-3">
+          <input v-model="cfg.DISCORD_GUILD_ID" placeholder="Guild ID" class="bg-slate-800 rounded px-3 py-2" />
+          <input v-model="cfg.DISCORD_CHANNEL_ID" placeholder="Voice channel ID" class="bg-slate-800 rounded px-3 py-2" />
+        </div>
+      </section>
+
+      <section class="bg-slate-900 rounded-xl p-4 space-y-3">
+        <h2 class="font-semibold">Presence</h2>
+        <div class="grid grid-cols-2 gap-3">
+          <select v-model="cfg.STATUS" class="bg-slate-800 rounded px-3 py-2">
+            <option value="online">online</option>
+            <option value="idle">idle</option>
+            <option value="dnd">dnd</option>
+            <option value="invisible">invisible</option>
+          </select>
+          <select v-model="cfg.ACTIVITY_TYPE" class="bg-slate-800 rounded px-3 py-2">
+            <option value="">no activity</option>
+            <option value="playing">playing</option>
+            <option value="listening">listening</option>
+            <option value="watching">watching</option>
+            <option value="competing">competing</option>
+            <option value="custom">custom</option>
+          </select>
+        </div>
+        <input v-model="cfg.ACTIVITY_TEXT" placeholder="Activity text" class="w-full bg-slate-800 rounded px-3 py-2" />
+        <input v-model="cfg.CUSTOM_STATUS" placeholder="Custom status" class="w-full bg-slate-800 rounded px-3 py-2" />
+        <label class="flex items-center gap-2 text-sm">
+          <input type="checkbox" v-model="selfDeaf" /> Self deafen
+        </label>
+      </section>
+
+      <div class="flex gap-3 flex-wrap">
+        <button @click="save" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded">Save config</button>
+        <button v-if="!running" @click="start" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded">Start</button>
+        <button v-else @click="update" class="bg-amber-600 hover:bg-amber-500 px-4 py-2 rounded">Update</button>
+        <button @click="stop" class="bg-rose-600 hover:bg-rose-500 px-4 py-2 rounded">Stop</button>
+        <button @click="terminate" class="bg-red-700 hover:bg-red-600 px-4 py-2 rounded">Terminate</button>
+        <button @click="switchAccount" class="bg-slate-600 hover:bg-slate-500 px-4 py-2 rounded">Switch account</button>
+        <span v-if="msg" class="text-sm text-slate-300 self-center">{{ msg }}</span>
+      </div>
+
+      <section class="bg-slate-900 rounded-xl p-4">
+        <h2 class="font-semibold mb-2">Log</h2>
+        <pre class="text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto text-slate-300">{{ log }}</pre>
+      </section>
+    </template>
+  </div>
+
+  <script>
+    const { createApp } = Vue;
+    createApp({
+      data() {
+        return {
+          tokens: [],
+          accountSelected: false,
+          selectedToken: '',
+          manualToken: '',
+          cfg: {},
+          profile: {},
+          selfDeaf: false,
+          running: false,
+          log: '',
+          msg: '',
+        };
+      },
+      async mounted() {
+        await this.detect();
+        await this.loadConfig();
+        if (this.cfg.DISCORD_TOKEN) {
+          this.accountSelected = true;
+          this.selectedToken = this.cfg.DISCORD_TOKEN;
+          await this.loadProfile();
+        }
+        this.poll();
+        setInterval(() => this.poll(), 3000);
+      },
+      methods: {
+        async detect() {
+          const r = await fetch('/api/tokens');
+          const d = await r.json();
+          this.tokens = d;
+        },
+        async selectAccount(t) {
+          this.selectedToken = t.token;
+          this.cfg.DISCORD_TOKEN = t.token;
+          this.profile = { username: t.username, global_name: t.global_name, avatar_url: t.avatar_url, id: t.id };
+          this.accountSelected = true;
+          await this.save();
+        },
+        async useManual() {
+          if (!this.manualToken) return;
+          this.selectedToken = this.manualToken;
+          this.cfg.DISCORD_TOKEN = this.manualToken;
+          this.accountSelected = true;
+          await this.loadProfile();
+          await this.save();
+        },
+        switchAccount() {
+          this.accountSelected = false;
+        },
+        async loadConfig() {
+          const r = await fetch('/api/config');
+          this.cfg = await r.json();
+          this.selfDeaf = (this.cfg.SELF_DEAF || '').toLowerCase() === 'true';
+        },
+        async loadProfile() {
+          const r = await fetch('/api/profile');
+          this.profile = await r.json();
+        },
+        async save() {
+          this.cfg.SELF_DEAF = this.selfDeaf ? 'true' : 'false';
+          const r = await fetch('/api/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(this.cfg) });
+          const d = await r.json();
+          this.msg = d.ok ? 'saved' : 'error';
+          await this.loadProfile();
+        },
+        async start() {
+          await this.save();
+          const r = await fetch('/api/start', { method: 'POST' });
+          const d = await r.json();
+          this.msg = d.message || 'started';
+          await this.poll();
+        },
+        async stop() {
+          await fetch('/api/stop', { method: 'POST' });
+          this.msg = 'stopped';
+          await this.poll();
+        },
+        async update() {
+          this.msg = 'updating...';
+          await this.save();
+          await fetch('/api/stop', { method: 'POST' });
+          for (let i = 0; i < 20; i++) {
+            await this.poll();
+            if (!this.running) break;
+            await new Promise(r => setTimeout(r, 250));
+          }
+          await fetch('/api/start', { method: 'POST' });
+          for (let i = 0; i < 20; i++) {
+            await this.poll();
+            if (this.running) break;
+            await new Promise(r => setTimeout(r, 250));
+          }
+          this.msg = 'updated';
+        },
+        async terminate() {
+          await fetch('/api/terminate', { method: 'POST' });
+          this.msg = 'terminated';
+          window.close();
+        },
+        async poll() {
+          const r = await fetch('/api/status');
+          const d = await r.json();
+          this.running = d.running;
+          this.log = d.log;
+        },
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>
