@@ -13,6 +13,8 @@ Built on discord.py-self. Automating a user account is against Discord's ToS: us
 - Live platform indicators: one status-coloured icon per platform your account is online on, read from Discord's own session list
 - Self-deafen / self-mute support
 - Local web UI (Discord-Keep-Alive.exe) with account auto-detection
+- Live UI: status, log and platform indicators are pushed over Server-Sent Events, no polling
+- Most settings apply to the running bot immediately; token, `PLATFORM` and self-deafen need a restart
 - Token auto-detection from local Discord profiles (Windows)
 - Multi-account selection
 - Exit codes: 0 stopped, 1 crashed (auto-restarts), 78 bad config/token
@@ -45,7 +47,9 @@ The installer creates a virtual environment, installs dependencies, and prompts 
 Discord-Keep-Alive.exe          # web UI (account selection + dashboard)
 ```
 
-Edit `.env` (or use the UI) and restart to apply settings.
+Status, activity, custom status and the guild/channel target are picked up by the running bot
+within about a second, no restart needed. Token, `PLATFORM` and self-deafen are only read at login,
+so those need **Update** (or a restart). The UI says so in the log when that happens.
 
 ## Configuration (.env)
 

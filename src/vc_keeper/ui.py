@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
-import time
 import sys
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,115 @@ STATE_FRESH_S = 60.0
 
 _proc: subprocess.Popen | None = None
 _proc_lock = threading.Lock()
+
+EVENT_LOG_LINES = 300
+EVENT_TICK_S = 0.4
+
+_subscribers: set[queue.Queue] = set()
+_sub_lock = threading.Lock()
+_hub_started = False
+
+
+def _proc_running() -> bool:
+    with _proc_lock:
+        return _proc is not None and _proc.poll() is None
+
+
+def _mtime(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _subscribe() -> queue.Queue:
+    q: queue.Queue = queue.Queue(maxsize=2000)
+    with _sub_lock:
+        _subscribers.add(q)
+    return q
+
+
+def _unsubscribe(q: queue.Queue) -> None:
+    with _sub_lock:
+        _subscribers.discard(q)
+
+
+def _broadcast(event: dict) -> None:
+    with _sub_lock:
+        targets = list(_subscribers)
+    for q in targets:
+        try:
+            q.put_nowait(event)
+        except queue.Full:
+            pass
+
+
+def _start_hub() -> None:
+    global _hub_started
+    with _sub_lock:
+        if _hub_started:
+            return
+        _hub_started = True
+    threading.Thread(target=_hub_loop, daemon=True, name="vc-keeper-events").start()
+
+
+def _hub_loop() -> None:
+    """Watch the bot's log, state file and process, and push changes to the UI."""
+    offset = _size(LOG_FILE)  # history is sent in the snapshot instead
+    state_mtime = _mtime(STATE_FILE)
+    running = _proc_running()
+    while True:
+        time.sleep(EVENT_TICK_S)
+
+        size = _size(LOG_FILE)
+        if size < offset:
+            offset = 0  # the log was truncated by a fresh start
+        if size > offset:
+            try:
+                with LOG_FILE.open("rb") as f:
+                    f.seek(offset)
+                    chunk = f.read()
+            except OSError:
+                chunk = b""
+            cut = chunk.rfind(b"\n")
+            if cut != -1:
+                data = chunk[: cut + 1]
+                offset += len(data)
+                lines = data.decode("utf-8", "replace").splitlines()
+                if lines:
+                    _broadcast({"type": "log", "lines": lines})
+
+        current = _mtime(STATE_FILE)
+        if current != state_mtime:
+            state_mtime = current
+            state = _read_state(True)
+            if state:
+                _broadcast({"type": "state", "data": state})
+
+        current_running = _proc_running()
+        if current_running != running:
+            running = current_running
+            _broadcast({"type": "status", "running": running})
+
+
+def _snapshot() -> dict:
+    running = _proc_running()
+    state = _read_state(running)
+    return {
+        "type": "snapshot",
+        "running": running,
+        "log": _tail_log(EVENT_LOG_LINES).splitlines(),
+        "sessions": state.get("sessions", []),
+        "user": state.get("user"),
+        "spoofed_platform": state.get("spoofed_platform"),
+    }
 
 
 def _read_env() -> dict[str, str]:
@@ -109,11 +219,41 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _write_event(self, payload: dict) -> None:
+        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_events(self) -> None:
+        """Keep the page live: snapshot on connect, then pushed updates."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        inbox = _subscribe()
+        try:
+            self._write_event(_snapshot())
+            while True:
+                try:
+                    payload = inbox.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    continue
+                self._write_event(payload)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            _unsubscribe(inbox)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/" or path == "/index.html":
             self._serve_file(WEB_DIR / "index.html")
+            return
+        if path == "/api/events":
+            self._stream_events()
             return
         if path == "/api/tokens":
             try:
@@ -180,8 +320,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"error": str(exc)})
             return
         if path == "/api/status":
-            global _proc
-            running = _proc is not None and _proc.poll() is None
+            running = _proc_running()
             state = _read_state(running)
             self._json(200, {
                 "running": running,
@@ -221,6 +360,7 @@ class Handler(BaseHTTPRequestHandler):
                     cmd = [_venv_python(), "-m", "vc_keeper"]
                 f = open(LOG_FILE, "a", encoding="utf-8")
                 _proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=f, stderr=subprocess.STDOUT)
+            _broadcast({"type": "status", "running": True})
             self._json(200, {"ok": True})
             return
         if path == "/api/stop":
@@ -232,6 +372,7 @@ class Handler(BaseHTTPRequestHandler):
                     except subprocess.TimeoutExpired:
                         _proc.kill()
                 _proc = None
+            _broadcast({"type": "status", "running": False})
             self._json(200, {"ok": True})
             return
         if path == "/api/terminate":
@@ -257,6 +398,7 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) ->
     if not (WEB_DIR / "index.html").is_file():
         (WEB_DIR / "index.html").write_text(_FALLBACK_HTML, encoding="utf-8")
     httpd = ThreadingHTTPServer((host, port), Handler)
+    _start_hub()
     url = f"http://{host}:{port}"
     print(f"[vc-keeper] UI running at {url}")
     if open_browser:

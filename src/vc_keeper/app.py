@@ -23,32 +23,55 @@ import re
 import signal
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 
-def _load_dotenv() -> None:
-    """Load a .env file from the cwd or project root into os.environ."""
-    candidates = [
+def find_env_file() -> Path | None:
+    """The .env in use: cwd first, then the project root, then the package."""
+    for path in (
         Path.cwd() / ".env",
         Path(__file__).resolve().parent.parent.parent / ".env",
         Path(__file__).resolve().parent / ".env",
-    ]
-    for path in candidates:
-        if not path.is_file():
+    ):
+        if path.is_file():
+            return path
+    return None
+
+
+def read_dotenv(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
             continue
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-                value = value[1:-1]
-            if key and key not in os.environ:
-                os.environ[key] = value
-        break
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if key:
+            data[key] = value
+    return data
+
+
+def _mtime(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _load_dotenv() -> None:
+    """Load a .env file from the cwd or project root into os.environ."""
+    path = find_env_file()
+    if path is None:
+        return
+    for key, value in read_dotenv(path).items():
+        os.environ.setdefault(key, value)
 
 import discord
 
@@ -62,6 +85,7 @@ HEALTH_CHECK_EVERY_S = 60.0
 LIBRARY_RECONNECT_GRACE_S = 30.0
 MAX_BACKOFF_S = 60.0
 STATE_PUBLISH_S = 5.0
+CONFIG_POLL_S = 1.0
 SNOWFLAKE = re.compile(r"^\d{16,22}$")
 
 
@@ -113,21 +137,25 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
+        return cls.from_mapping(os.environ)
+
+    @classmethod
+    def from_mapping(cls, env: Mapping[str, str]) -> Config:
         problems: list[str] = []
 
-        token = os.environ.get("DISCORD_TOKEN", "").strip()
+        token = env.get("DISCORD_TOKEN", "").strip()
         if not token:
             problems.append("DISCORD_TOKEN is missing")
 
         def snowflake(name: str) -> int:
-            raw = os.environ.get(name, "").strip()
+            raw = env.get(name, "").strip()
             if not SNOWFLAKE.fullmatch(raw):
                 problems.append(f"{name} must be a Discord ID (16-22 digits)")
                 return 0
             return int(raw)
 
         def seconds(name: str, default: float) -> float:
-            raw = os.environ.get(name, "").strip()
+            raw = env.get(name, "").strip()
             if not raw:
                 return default
             try:
@@ -146,23 +174,23 @@ class Config:
         if cooldown_max < cooldown_min:
             problems.append("REJOIN_COOLDOWN_MAX must be >= REJOIN_COOLDOWN_MIN")
 
-        self_deaf = os.environ.get("SELF_DEAF", "false").strip().lower() in {"1", "true", "yes", "on"}
-        log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+        self_deaf = env.get("SELF_DEAF", "false").strip().lower() in {"1", "true", "yes", "on"}
+        log_level = env.get("LOG_LEVEL", "INFO").strip().upper()
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
             problems.append("LOG_LEVEL must be DEBUG, INFO, WARNING or ERROR")
 
-        status = os.environ.get("STATUS", "online").strip().lower() or "online"
+        status = env.get("STATUS", "online").strip().lower() or "online"
         if status not in {"online", "idle", "dnd", "invisible"}:
             problems.append("STATUS must be online, idle, dnd or invisible")
 
-        activity_type = os.environ.get("ACTIVITY_TYPE", "").strip().lower()
+        activity_type = env.get("ACTIVITY_TYPE", "").strip().lower()
         if activity_type and activity_type not in {"playing", "listening", "watching", "competing", "custom"}:
             problems.append("ACTIVITY_TYPE must be playing, listening, watching, competing or custom")
 
-        activity_text = os.environ.get("ACTIVITY_TEXT", "").strip()
-        custom_status = os.environ.get("CUSTOM_STATUS", "").strip()
+        activity_text = env.get("ACTIVITY_TEXT", "").strip()
+        custom_status = env.get("CUSTOM_STATUS", "").strip()
 
-        platform = os.environ.get("PLATFORM", "windows").strip().lower() or "windows"
+        platform = env.get("PLATFORM", "windows").strip().lower() or "windows"
         platform = PLATFORM_ALIASES.get(platform, platform)
         if platform not in PLATFORM_CHOICES:
             problems.append("PLATFORM must be one of " + ", ".join(PLATFORM_CHOICES))
@@ -174,6 +202,10 @@ class Config:
             token, guild_id, channel_id, self_deaf, cooldown_min, cooldown_max, log_level,
             status, activity_type, activity_text, custom_status, platform,
         )
+
+    def presence(self) -> tuple[str, str, str, str]:
+        """The parts of the config that only affect presence, for change detection."""
+        return (self.status, self.activity_type, self.activity_text, self.custom_status)
 
 
 # --------------------------------------------------------------------------- client
@@ -194,6 +226,7 @@ class VcKeeper(discord.Client):
         self._kicked = False
         self._supervisor: asyncio.Task[None] | None = None
         self._state: asyncio.Task[None] | None = None
+        self._config_task: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[None] | None = None
 
     # ---- lifecycle --------------------------------------------------------
@@ -202,6 +235,7 @@ class VcKeeper(discord.Client):
         self._supervisor = asyncio.create_task(self._supervise(), name="vc-keeper-supervisor")
         self._supervisor.add_done_callback(self._on_supervisor_done)
         self._state = asyncio.create_task(self._publish_loop(), name="vc-keeper-state")
+        self._config_task = asyncio.create_task(self._watch_config(), name="vc-keeper-config")
 
     def _on_supervisor_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled() or self.is_closed():
@@ -318,6 +352,73 @@ class VcKeeper(discord.Client):
         log.warning("voice state changed: %s", where)
         self._kicked = True
         self._wake.set()
+        self.publish_state()
+
+    # ---- live config ---------------------------------------------------------
+
+    async def _watch_config(self) -> None:
+        """Apply .env edits to the running bot, without a restart."""
+        path = find_env_file()
+        last = _mtime(path)
+        while not self.is_closed():
+            await asyncio.sleep(CONFIG_POLL_S)
+            if path is None:
+                path = find_env_file()
+                if path is not None:
+                    last = _mtime(path)
+                continue
+            current = _mtime(path)
+            if current is None or current == last:
+                continue
+            last = current
+            try:
+                config = Config.from_mapping(read_dotenv(path))
+            except ConfigError as exc:
+                log.warning("config change ignored: %s", exc)
+                continue
+            try:
+                await self._apply_config(config)
+            except Exception:
+                log.exception("could not apply config change")
+
+    async def _apply_config(self, config: Config) -> None:
+        old = self.config
+        old_vc = self._voice_client()
+        self.config = config
+
+        if config.presence() != old.presence():
+            detail = config.status
+            if config.activity_type and config.activity_text:
+                detail += f" ({config.activity_type} {config.activity_text})"
+            elif config.custom_status:
+                detail += f" ({config.custom_status})"
+            if self.is_ready():
+                log.info("presence updated: %s", detail)
+                await self._update_presence()
+            else:
+                log.info("presence %s saved, applies on login", detail)
+
+        if (config.guild_id, config.channel_id) != (old.guild_id, old.channel_id):
+            log.info("target is now channel %s in guild %s", config.channel_id, config.guild_id)
+            if old_vc is not None:
+                try:
+                    await old_vc.disconnect(force=True)
+                except (discord.ClientException, OSError):
+                    log.debug("could not leave the old channel", exc_info=True)
+            self._wake.set()
+
+        needs_restart = [
+            name
+            for changed, name in (
+                (config.token != old.token, "token"),
+                (config.platform != old.platform, "platform"),
+                (config.self_deaf != old.self_deaf, "self-deafen"),
+            )
+            if changed
+        ]
+        if needs_restart:
+            log.info("%s changed, restart the bot to apply it", ", ".join(needs_restart))
+
         self.publish_state()
 
     # ---- live state for the UI ----------------------------------------------

@@ -36,8 +36,10 @@
           </p>
         </div>
       </div>
-      <span class="text-sm" :class="running ? 'text-emerald-400' : 'text-slate-400'">
+      <span class="text-sm flex items-center gap-2" :class="running ? 'text-emerald-400' : 'text-slate-400'">
+        <span class="w-2 h-2 rounded-full" :class="running ? 'bg-emerald-400' : 'bg-slate-600'"></span>
         {{ running ? 'running' : 'stopped' }}
+        <span v-if="!live" class="text-amber-400/80">· reconnecting…</span>
       </span>
     </header>
 
@@ -141,7 +143,7 @@
 
       <section class="bg-slate-900 rounded-xl p-4">
         <h2 class="font-semibold mb-2">Log</h2>
-        <pre class="text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto text-slate-300">{{ log }}</pre>
+        <pre ref="logBox" class="text-xs font-mono whitespace-pre-wrap max-h-96 overflow-auto text-slate-300">{{ log }}</pre>
       </section>
     </template>
   </div>
@@ -215,6 +217,8 @@
           running: false,
           sessions: [],
           log: '',
+          live: false,
+          es: null,
           msg: '',
         };
       },
@@ -226,8 +230,7 @@
           this.selectedToken = this.cfg.DISCORD_TOKEN;
           await this.loadProfile();
         }
-        this.poll();
-        setInterval(() => this.poll(), 3000);
+        this.connect();
       },
       computed: {
         selectedPlatform() {
@@ -300,6 +303,39 @@
         },
       },
       methods: {
+        // Live stream from the UI server: snapshot, log lines, bot state, process status.
+        connect() {
+          if (this.es) this.es.close();
+          const es = new EventSource('/api/events');
+          this.es = es;
+          es.onopen = () => { this.live = true; };
+          es.onerror = () => { this.live = false; };
+          es.onmessage = (ev) => {
+            let d;
+            try { d = JSON.parse(ev.data); } catch (e) { return; }
+            if (d.type === 'snapshot') {
+              this.running = d.running;
+              this.log = (d.log || []).join('\n');
+              this.sessions = d.running ? (d.sessions || []) : [];
+              this.scrollLog();
+            } else if (d.type === 'log') {
+              const lines = (this.log ? this.log.split('\n') : []).concat(d.lines || []);
+              this.log = lines.slice(-300).join('\n');
+              this.scrollLog();
+            } else if (d.type === 'state') {
+              this.sessions = d.data.sessions || [];
+            } else if (d.type === 'status') {
+              this.running = d.running;
+              if (!d.running) this.sessions = [];
+            }
+          };
+        },
+        scrollLog() {
+          this.$nextTick(() => {
+            const box = this.$refs.logBox;
+            if (box) box.scrollTop = box.scrollHeight;
+          });
+        },
         async detect() {
           const r = await fetch('/api/tokens');
           const d = await r.json();
