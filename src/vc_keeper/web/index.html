@@ -13,9 +13,24 @@
       <div class="flex items-center gap-3">
         <img v-if="profile.avatar_url" :src="profile.avatar_url" class="w-10 h-10 rounded-full" />
         <div v-else class="w-10 h-10 rounded-full bg-slate-700"></div>
-        <div>
-          <h1 class="text-2xl font-bold">Discord-Keep-Alive</h1>
-          <p class="text-sm text-slate-400">{{ profile.global_name || profile.username || 'not logged in' }}</p>
+        <div class="space-y-1.5">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h1 class="text-2xl font-bold">Discord-Keep-Alive</h1>
+            <div class="flex items-center gap-1.5">
+              <span v-for="p in platformIndicators" :key="p.key"
+                class="flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full border"
+                :class="p.online ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-slate-700/70 bg-slate-800/40 text-slate-500'"
+                :title="p.title">
+                <span>{{ p.icon }}</span>
+                <span>{{ p.label }}</span>
+                <span class="w-1.5 h-1.5 rounded-full" :class="p.online ? 'bg-emerald-400' : 'bg-slate-600'"></span>
+              </span>
+            </div>
+          </div>
+          <p class="text-sm text-slate-400">
+            {{ profile.global_name || profile.username || 'not logged in' }}
+            <span v-if="onlineSummary" class="text-slate-500">· online on {{ onlineSummary }}</span>
+          </p>
         </div>
       </div>
       <span class="text-sm" :class="running ? 'text-emerald-400' : 'text-slate-400'">
@@ -77,9 +92,21 @@
             <option value="competing">competing</option>
             <option value="custom">custom</option>
           </select>
+          <div class="flex gap-2 flex-wrap">
+            <button v-for="p in platforms" :key="p.value"
+              @click="cfg.PLATFORM = p.value; save()"
+              :class="cfg.PLATFORM === p.value ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'"
+              class="px-3 py-2 rounded text-sm">
+              {{ p.icon }} {{ p.label }}
+            </button>
+          </div>
         </div>
         <input v-model="cfg.ACTIVITY_TEXT" placeholder="Activity text" class="w-full bg-slate-800 rounded px-3 py-2" />
         <input v-model="cfg.CUSTOM_STATUS" placeholder="Custom status" class="w-full bg-slate-800 rounded px-3 py-2" />
+        <p class="text-xs text-slate-500">
+          Platform spoofer (applies when the bot logs in). The indicators in the header show every
+          platform Discord reports this account online on.
+        </p>
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" v-model="selfDeaf" /> Self deafen
         </label>
@@ -108,6 +135,12 @@
       data() {
         return {
           tokens: [],
+          platforms: [
+            { value: 'windows', label: 'Windows', icon: '🖥️' },
+            { value: 'mac', label: 'macOS', icon: '🍎' },
+            { value: 'linux', label: 'Linux', icon: '🐧' },
+            { value: 'web', label: 'Web', icon: '🌐' },
+          ],
           accountSelected: false,
           selectedToken: '',
           manualToken: '',
@@ -115,6 +148,7 @@
           profile: {},
           selfDeaf: false,
           running: false,
+          sessions: [],
           log: '',
           msg: '',
         };
@@ -129,6 +163,34 @@
         }
         this.poll();
         setInterval(() => this.poll(), 3000);
+      },
+      computed: {
+        platformIndicators() {
+          const meta = {
+            desktop: { icon: '🖥️', label: 'Desktop' },
+            mobile: { icon: '📱', label: 'Mobile' },
+            web: { icon: '🌐', label: 'Browser' },
+          };
+          const online = {};
+          for (const s of this.sessions) {
+            const key = meta[s.client] ? s.client : 'desktop';
+            (online[key] = online[key] || []).push(s.os + (s.status && s.status !== 'online' ? ' · ' + s.status : ''));
+          }
+          return ['desktop', 'mobile', 'web'].map((key) => ({
+            key,
+            icon: meta[key].icon,
+            label: meta[key].label,
+            online: Boolean(online[key]),
+            title: online[key]
+              ? `${meta[key].label} · ${online[key].join(', ')}`
+              : `${meta[key].label} · not online`,
+          }));
+        },
+        onlineSummary() {
+          return this.sessions
+            .map((s) => (s.client === 'web' ? 'browser' : s.client) + ' (' + s.os + ')')
+            .join(', ');
+        },
       },
       methods: {
         async detect() {
@@ -208,6 +270,7 @@
           const r = await fetch('/api/status');
           const d = await r.json();
           this.running = d.running;
+          this.sessions = d.running ? (d.sessions || []) : [];
           this.log = d.log;
         },
       },

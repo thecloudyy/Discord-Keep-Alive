@@ -9,6 +9,8 @@ Built on discord.py-self. Automating a user account is against Discord's ToS: us
 - Randomized rejoin cooldowns, zero API polling
 - Optional custom status and activity (playing/listening/watching/competing)
 - Status modes: online, idle, dnd, invisible
+- Platform spoofer: appear as Windows, macOS, Linux or web
+- Live platform indicators: every platform your account is online on, read from Discord's own session list
 - Self-deafen / self-mute support
 - Local web UI (Discord-Keep-Alive.exe) with account auto-detection
 - Token auto-detection from local Discord profiles (Windows)
@@ -57,6 +59,7 @@ STATUS=online
 ACTIVITY_TYPE=
 ACTIVITY_TEXT=
 CUSTOM_STATUS=
+PLATFORM=windows
 REJOIN_COOLDOWN_MIN=10
 REJOIN_COOLDOWN_MAX=120
 ```

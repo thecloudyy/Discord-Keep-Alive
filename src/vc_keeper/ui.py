@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 import sys
 import threading
 import webbrowser
@@ -18,6 +19,8 @@ else:
     ROOT = Path(__file__).resolve().parent.parent.parent
 WEB_DIR = Path(__file__).resolve().parent / "web"
 LOG_FILE = ROOT / ".vc-keeper.log"
+STATE_FILE = ROOT / ".vc-keeper.state.json"
+STATE_FRESH_S = 60.0
 
 _proc: subprocess.Popen | None = None
 _proc_lock = threading.Lock()
@@ -40,7 +43,7 @@ def _write_env(data: dict[str, str]) -> None:
     order = [
         "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID", "LOG_LEVEL",
         "SELF_DEAF", "STATUS", "ACTIVITY_TYPE", "ACTIVITY_TEXT", "CUSTOM_STATUS",
-        "REJOIN_COOLDOWN_MIN", "REJOIN_COOLDOWN_MAX",
+        "PLATFORM", "REJOIN_COOLDOWN_MIN", "REJOIN_COOLDOWN_MAX",
     ]
     lines = []
     for k in order:
@@ -58,6 +61,20 @@ def _venv_python() -> str:
     else:
         cand = ROOT / ".venv" / "bin" / "python"
     return str(cand if cand.is_file() else sys.executable)
+
+
+def _read_state(running: bool) -> dict:
+    """Live state published by the bot: the platforms the account is online on."""
+    if not running or not STATE_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        age = time.time() - float(data.get("updated_at", 0))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if age > STATE_FRESH_S:
+        return {}
+    return data
 
 
 def _tail_log(n: int = 80) -> str:
@@ -165,7 +182,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             global _proc
             running = _proc is not None and _proc.poll() is None
-            self._json(200, {"running": running, "log": _tail_log()})
+            state = _read_state(running)
+            self._json(200, {
+                "running": running,
+                "log": _tail_log(),
+                "sessions": state.get("sessions", []),
+                "user": state.get("user"),
+                "spoofed_platform": state.get("spoofed_platform"),
+            })
             return
         self.send_error(404)
 

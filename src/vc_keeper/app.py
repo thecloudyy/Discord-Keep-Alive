@@ -15,6 +15,7 @@ if getattr(sys, "frozen", False):
             os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -60,7 +61,17 @@ EXIT_CONFIG = 78
 HEALTH_CHECK_EVERY_S = 60.0
 LIBRARY_RECONNECT_GRACE_S = 30.0
 MAX_BACKOFF_S = 60.0
+STATE_PUBLISH_S = 5.0
 SNOWFLAKE = re.compile(r"^\d{16,22}$")
+
+
+def _root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+STATE_FILE = _root() / ".vc-keeper.state.json"
 
 
 # --------------------------------------------------------------------------- config
@@ -83,6 +94,7 @@ class Config:
     activity_type: str = ""
     activity_text: str = ""
     custom_status: str = ""
+    platform: str = "windows"
 
     @classmethod
     def from_env(cls) -> Config:
@@ -135,12 +147,16 @@ class Config:
         activity_text = os.environ.get("ACTIVITY_TEXT", "").strip()
         custom_status = os.environ.get("CUSTOM_STATUS", "").strip()
 
+        platform = os.environ.get("PLATFORM", "windows").strip().lower() or "windows"
+        if platform not in {"windows", "mac", "linux", "web"}:
+            problems.append("PLATFORM must be windows, mac, linux or web")
+
         if problems:
             raise ConfigError("; ".join(problems))
 
         return cls(
             token, guild_id, channel_id, self_deaf, cooldown_min, cooldown_max, log_level,
-            status, activity_type, activity_text, custom_status,
+            status, activity_type, activity_text, custom_status, platform,
         )
 
 
@@ -157,9 +173,11 @@ class VcKeeper(discord.Client):
             member_cache_flags=discord.MemberCacheFlags(joined=False),
         )
         self.config = config
+        self.started_at = time.time()
         self._wake = asyncio.Event()
         self._kicked = False
         self._supervisor: asyncio.Task[None] | None = None
+        self._state: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[None] | None = None
 
     # ---- lifecycle --------------------------------------------------------
@@ -167,6 +185,7 @@ class VcKeeper(discord.Client):
     async def setup_hook(self) -> None:
         self._supervisor = asyncio.create_task(self._supervise(), name="vc-keeper-supervisor")
         self._supervisor.add_done_callback(self._on_supervisor_done)
+        self._state = asyncio.create_task(self._publish_loop(), name="vc-keeper-state")
 
     def _on_supervisor_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled() or self.is_closed():
@@ -185,11 +204,55 @@ class VcKeeper(discord.Client):
         log.info("logged in as %s (%s)", self.user, self.user.id)
         await self._update_presence()
         self._wake.set()
+        self.publish_state()
 
     async def on_resumed(self) -> None:
         log.info("gateway session resumed")
         await self._update_presence()
         self._wake.set()
+        self.publish_state()
+
+    async def on_session_create(self, session: discord.Session) -> None:
+        self.publish_state()
+
+    async def on_session_update(self, before: discord.Session, after: discord.Session) -> None:
+        self.publish_state()
+
+    async def on_session_delete(self, session: discord.Session) -> None:
+        self.publish_state()
+
+    async def headers_context(self) -> discord.HeadersContext:
+        http = self.http
+        session = http._HTTPClient__asession  # type: ignore
+        platform = (self.config.platform or "windows").lower()
+        try:
+            if platform == "windows":
+                return await discord.HeadersContext.desktop(session)
+            if platform == "mac":
+                data = await discord.HeadersContext.fetch_api_properties(session, "mac")
+                bv = int(data["metadata"]["native_chrome_version"].split(".")[0])
+                return discord.HeadersContext(
+                    platform="macOS",
+                    browser_type="electron",
+                    browser_major_version=bv,
+                    super_properties=data["properties"],
+                    encoded_super_properties=data.get("encoded"),
+                    extra_gateway_properties=data.get("extra_gateway_properties"),
+                )
+            if platform == "linux":
+                data = await discord.HeadersContext.fetch_api_properties(session, "linux")
+                bv = int(data["metadata"]["native_chrome_version"].split(".")[0])
+                return discord.HeadersContext(
+                    platform="Linux",
+                    browser_type="electron",
+                    browser_major_version=bv,
+                    super_properties=data["properties"],
+                    encoded_super_properties=data.get("encoded"),
+                    extra_gateway_properties=data.get("extra_gateway_properties"),
+                )
+        except Exception as exc:
+            log.warning("platform spoof failed, falling back to default: %s", exc)
+        return await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
 
     async def _update_presence(self) -> None:
         status_map = {
@@ -238,6 +301,53 @@ class VcKeeper(discord.Client):
         log.warning("voice state changed: %s", where)
         self._kicked = True
         self._wake.set()
+        self.publish_state()
+
+    # ---- live state for the UI ----------------------------------------------
+
+    def _session_rows(self) -> list[dict[str, object]]:
+        """Every session Discord reports for this account (the platforms it's online on)."""
+        rows: list[dict[str, object]] = []
+        for session in self.sessions:
+            if getattr(session, "session_id", None) == "all":
+                continue  # synthetic aggregate session, not a platform
+            rows.append(
+                {
+                    "client": str(getattr(session, "client", "unknown")),
+                    "os": getattr(getattr(session, "os", None), "name", "unknown"),
+                    "status": getattr(getattr(session, "status", None), "name", "offline"),
+                    "active": bool(getattr(session, "active", False)),
+                }
+            )
+        return rows
+
+    def publish_state(self) -> None:
+        user = None
+        if self.user is not None:
+            user = {
+                "id": str(self.user.id),
+                "username": self.user.name,
+                "global_name": getattr(self.user, "global_name", None),
+            }
+        payload = {
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "updated_at": time.time(),
+            "user": user,
+            "spoofed_platform": self.config.platform,
+            "sessions": self._session_rows(),
+        }
+        tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, STATE_FILE)
+        except OSError as exc:
+            log.debug("could not publish state: %s", exc)
+
+    async def _publish_loop(self) -> None:
+        while not self.is_closed():
+            self.publish_state()
+            await asyncio.sleep(STATE_PUBLISH_S)
 
     # ---- the one loop that decides everything -------------------------------
 
