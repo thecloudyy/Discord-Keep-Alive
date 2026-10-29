@@ -18,12 +18,15 @@
             <h1 class="text-2xl font-bold">Discord-Keep-Alive</h1>
             <div class="flex items-center gap-1.5">
               <span v-for="p in platformIndicators" :key="p.key"
-                class="flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full border"
-                :class="p.online ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-slate-700/70 bg-slate-800/40 text-slate-500'"
+                class="flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full border text-slate-300"
+                :class="p.online ? 'border-slate-700 bg-slate-800/70' : 'border-slate-800 bg-slate-900/60 text-slate-500'"
                 :title="p.title">
-                <span>{{ p.icon }}</span>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+                  :stroke="p.online ? p.color : '#80848e'"
+                  stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="shrink-0">
+                  <path v-for="(d, i) in p.paths" :key="i" :d="d" />
+                </svg>
                 <span>{{ p.label }}</span>
-                <span class="w-1.5 h-1.5 rounded-full" :class="p.online ? 'bg-emerald-400' : 'bg-slate-600'"></span>
               </span>
             </div>
           </div>
@@ -92,20 +95,34 @@
             <option value="competing">competing</option>
             <option value="custom">custom</option>
           </select>
-          <div class="flex gap-2 flex-wrap">
-            <button v-for="p in platforms" :key="p.value"
-              @click="cfg.PLATFORM = p.value; save()"
-              :class="cfg.PLATFORM === p.value ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'"
-              class="px-3 py-2 rounded text-sm">
-              {{ p.icon }} {{ p.label }}
-            </button>
+          <div class="col-span-2 space-y-2">
+            <p class="text-xs uppercase tracking-wide text-slate-500">platform spoofer</p>
+            <div v-for="g in platformGroups" :key="g.label" class="flex items-center gap-2 flex-wrap">
+              <span class="text-xs text-slate-500 w-16 shrink-0">{{ g.label }}</span>
+              <button v-for="p in g.options" :key="p.value"
+                @click="setPlatform(p.value)"
+                :class="selectedPlatform === p.value ? 'bg-indigo-600 text-white' : 'bg-slate-800 hover:bg-slate-700'"
+                class="px-3 py-1.5 rounded text-sm">
+                {{ p.icon }} {{ p.label }}
+              </button>
+            </div>
+            <p class="text-xs text-slate-500">
+              Spoofing iOS, Android, Xbox, PlayStation or VR overrides the client identity Discord
+              builds your session from, so every device shows that platform. Applies on the next
+              login.
+            </p>
+            <p class="text-xs text-amber-400/80">
+              Xbox, PlayStation and VR can make your client look out of date, and forcing a platform
+              you are not on may get your account flagged. The header indicators show where Discord
+              really reports this account online.
+            </p>
           </div>
         </div>
         <input v-model="cfg.ACTIVITY_TEXT" placeholder="Activity text" class="w-full bg-slate-800 rounded px-3 py-2" />
         <input v-model="cfg.CUSTOM_STATUS" placeholder="Custom status" class="w-full bg-slate-800 rounded px-3 py-2" />
         <p class="text-xs text-slate-500">
-          Platform spoofer (applies when the bot logs in). The indicators in the header show every
-          platform Discord reports this account online on.
+          Indicators in the header come from Discord's own session list: one icon per platform the
+          account is online on, coloured by that session's status.
         </p>
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" v-model="selfDeaf" /> Self deafen
@@ -135,12 +152,60 @@
       data() {
         return {
           tokens: [],
-          platforms: [
-            { value: 'windows', label: 'Windows', icon: '🖥️' },
-            { value: 'mac', label: 'macOS', icon: '🍎' },
-            { value: 'linux', label: 'Linux', icon: '🐧' },
-            { value: 'web', label: 'Web', icon: '🌐' },
+          platformGroups: [
+            { label: 'Desktop', options: [
+              { value: 'windows', label: 'Windows', icon: '🖥️' },
+              { value: 'mac', label: 'macOS', icon: '🍎' },
+              { value: 'linux', label: 'Linux', icon: '🐧' },
+            ] },
+            { label: 'Web', options: [{ value: 'web', label: 'Web', icon: '🌐' }] },
+            { label: 'Mobile', options: [
+              { value: 'android', label: 'Android', icon: '🤖' },
+              { value: 'ios', label: 'iOS', icon: '📱' },
+            ] },
+            { label: 'Console', options: [
+              { value: 'xbox', label: 'Xbox', icon: '🎮' },
+              { value: 'playstation', label: 'PlayStation', icon: '🎮' },
+            ] },
+            { label: 'VR', options: [{ value: 'vr', label: 'VR', icon: '🥽' }] },
           ],
+          // platform icons, drawn as outlined paths so they can take the status colour
+          platformMeta: {
+            desktop: {
+              label: 'Desktop', tooltip: 'Desktop',
+              paths: ['M4 4.8h16v10.4H4z', 'M12 15.2v4.2M9.5 19.4h5'],
+            },
+            web: {
+              label: 'Web', tooltip: 'Web',
+              paths: [
+                'M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z',
+                'M3.5 12h17',
+                'M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5S9.6 5.8 12 3.5Z',
+              ],
+            },
+            mobile: {
+              label: 'Mobile', tooltip: 'Mobile',
+              paths: [
+                'M9.6 2.6h4.8a2.6 2.6 0 0 1 2.6 2.6v13.6a2.6 2.6 0 0 1-2.6 2.6H9.6A2.6 2.6 0 0 1 7 18.8V5.2a2.6 2.6 0 0 1 2.6-2.6Z',
+                'M10.8 18.2h2.4',
+              ],
+            },
+            embedded: {
+              label: 'Embedded', tooltip: 'Embedded (Console or Game)',
+              paths: [
+                'M7.4 7h9.2a4.6 4.6 0 0 1 4.6 4.6v1.4a3.9 3.9 0 0 1-6.6 2.8l-1.1-1.2h-3l-1.1 1.2A3.9 3.9 0 0 1 2.8 13v-1.4A4.6 4.6 0 0 1 7.4 7Z',
+                'M8.2 10.2v3.2M6.6 11.8h3.2',
+                'M15.6 11.2h.1',
+                'M17.9 13.3h.1',
+              ],
+            },
+            vr: {
+              label: 'VR', tooltip: 'VR',
+              paths: [
+                'M4.8 8.6h14.4a2.3 2.3 0 0 1 2.3 2.3v2.2a2.3 2.3 0 0 1-2.3 2.3h-2.5l-1.5-1.7H9l-1.5 1.7H4.8a2.3 2.3 0 0 1-2.3-2.3v-2.2a2.3 2.3 0 0 1 2.3-2.3Z',
+              ],
+            },
+          },
           accountSelected: false,
           selectedToken: '',
           manualToken: '',
@@ -165,30 +230,64 @@
         setInterval(() => this.poll(), 3000);
       },
       computed: {
-        platformIndicators() {
-          const meta = {
-            desktop: { icon: '🖥️', label: 'Desktop' },
-            mobile: { icon: '📱', label: 'Mobile' },
-            web: { icon: '🌐', label: 'Browser' },
+        selectedPlatform() {
+          const alias = { desktop: 'windows', macos: 'mac', mobile: 'ios' };
+          const raw = (this.cfg.PLATFORM || 'windows').toLowerCase();
+          return alias[raw] || raw;
+        },
+        spoofClient() {
+          const map = {
+            windows: 'desktop', mac: 'desktop', linux: 'desktop', web: 'web',
+            android: 'mobile', ios: 'mobile', xbox: 'embedded', playstation: 'embedded', vr: 'vr',
           };
-          const online = {};
+          return map[this.selectedPlatform] || 'desktop';
+        },
+        // One indicator per platform the account is online on, like Vencord's
+        // PlatformIndicators: sessions are merged per client, online wins over
+        // idle/dnd, and each icon takes that platform's status colour.
+        platformIndicators() {
+          const order = ['desktop', 'web', 'mobile', 'embedded', 'vr'];
+          const rank = { online: 0, idle: 1, dnd: 2, offline: 3, invisible: 3 };
+          const colours = {
+            online: '#23a55a', idle: '#f0b232', dnd: '#f23f43', offline: '#80848e', invisible: '#80848e',
+          };
+          const merged = {};
           for (const s of this.sessions) {
-            const key = meta[s.client] ? s.client : 'desktop';
-            (online[key] = online[key] || []).push(s.os + (s.status && s.status !== 'online' ? ' · ' + s.status : ''));
+            if (!order.includes(s.client)) continue;
+            const status = s.status in rank ? s.status : 'offline';
+            const entry = merged[s.client] || (merged[s.client] = { status, os: [] });
+            if (rank[status] < rank[entry.status]) entry.status = status;
+            if (s.os && s.os !== 'unknown' && !entry.os.includes(s.os)) entry.os.push(s.os);
           }
-          return ['desktop', 'mobile', 'web'].map((key) => ({
-            key,
-            icon: meta[key].icon,
-            label: meta[key].label,
-            online: Boolean(online[key]),
-            title: online[key]
-              ? `${meta[key].label} · ${online[key].join(', ')}`
-              : `${meta[key].label} · not online`,
-          }));
+          const chips = order.filter((k) => merged[k]).map((k) => {
+            const meta = this.platformMeta[k];
+            const entry = merged[k];
+            const badge = entry.status === 'invisible' ? 'offline' : entry.status;
+            return {
+              key: k,
+              label: meta.label,
+              paths: meta.paths,
+              online: true,
+              color: colours[entry.status] || '#80848e',
+              title: `${meta.tooltip}${entry.os.length ? ' · ' + entry.os.join(', ') : ''} · ${badge}`,
+            };
+          });
+          if (chips.length) return chips;
+          // Nothing live yet: show what we are going to look like when we log in.
+          const meta = this.platformMeta[this.spoofClient];
+          return [{
+            key: 'spoof',
+            label: meta.label,
+            paths: meta.paths,
+            online: false,
+            color: '#80848e',
+            title: `Spoofed as ${meta.tooltip} · not online`,
+          }];
         },
         onlineSummary() {
-          return this.sessions
-            .map((s) => (s.client === 'web' ? 'browser' : s.client) + ' (' + s.os + ')')
+          return this.platformIndicators
+            .filter((p) => p.key !== 'spoof')
+            .map((p) => p.label)
             .join(', ');
         },
       },
@@ -215,6 +314,10 @@
         },
         switchAccount() {
           this.accountSelected = false;
+        },
+        async setPlatform(value) {
+          this.cfg.PLATFORM = value;
+          await this.save();
         },
         async loadConfig() {
           const r = await fetch('/api/config');

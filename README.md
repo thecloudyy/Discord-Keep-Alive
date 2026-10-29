@@ -9,8 +9,8 @@ Built on discord.py-self. Automating a user account is against Discord's ToS: us
 - Randomized rejoin cooldowns, zero API polling
 - Optional custom status and activity (playing/listening/watching/competing)
 - Status modes: online, idle, dnd, invisible
-- Platform spoofer: appear as Windows, macOS, Linux or web
-- Live platform indicators: every platform your account is online on, read from Discord's own session list
+- Platform spoofer: Windows, macOS, Linux, web, Android, iOS, Xbox, PlayStation or VR
+- Live platform indicators: one status-coloured icon per platform your account is online on, read from Discord's own session list
 - Self-deafen / self-mute support
 - Local web UI (Discord-Keep-Alive.exe) with account auto-detection
 - Token auto-detection from local Discord profiles (Windows)
@@ -63,6 +63,26 @@ PLATFORM=windows
 REJOIN_COOLDOWN_MIN=10
 REJOIN_COOLDOWN_MAX=120
 ```
+
+## Platforms
+
+`PLATFORM` picks what Discord thinks you are running:
+
+| Value | Shows as |
+| --- | --- |
+| `windows`, `mac`, `linux` | Desktop on that OS (full desktop client identity) |
+| `web` | Browser |
+| `android`, `ios` | Mobile on that OS |
+| `xbox`, `playstation` | Embedded (console or game) |
+| `vr` | VR |
+
+Desktop values send a matching desktop client identity. The rest override the `browser` entry of
+the gateway IDENTIFY payload (the same mechanism Equicord's PlatformSpoofer uses), which is what
+Discord turns into a session's client and OS. Changes apply on the next login; Xbox,
+PlayStation and VR can make your client look out of date.
+
+The header of the UI shows one status-coloured icon per platform the account is actually online
+on, merged from Discord's session list the way Vencord's PlatformIndicators does it.
 
 ## Obtaining your token
 

@@ -73,6 +73,21 @@ def _root() -> Path:
 
 STATE_FILE = _root() / ".vc-keeper.state.json"
 
+# Which platform to pretend to be. Desktop variants are spoofed with a full
+# desktop client identity; the rest are spoofed the same way Equicord's
+# PlatformSpoofer does it: by overriding the `browser` field of the gateway
+# IDENTIFY properties, which is what Discord reads to fill in a session's
+# client/os.
+PLATFORM_CHOICES = ("windows", "mac", "linux", "web", "android", "ios", "xbox", "playstation", "vr")
+PLATFORM_ALIASES = {"desktop": "windows", "macos": "mac", "mobile": "ios"}
+SPOOFED_BROWSERS = {
+    "android": "Discord Android",
+    "ios": "Discord iOS",
+    "xbox": "Discord Embedded",
+    "playstation": "Discord Embedded",
+    "vr": "Discord VR",
+}
+
 
 # --------------------------------------------------------------------------- config
 
@@ -148,8 +163,9 @@ class Config:
         custom_status = os.environ.get("CUSTOM_STATUS", "").strip()
 
         platform = os.environ.get("PLATFORM", "windows").strip().lower() or "windows"
-        if platform not in {"windows", "mac", "linux", "web"}:
-            problems.append("PLATFORM must be windows, mac, linux or web")
+        platform = PLATFORM_ALIASES.get(platform, platform)
+        if platform not in PLATFORM_CHOICES:
+            problems.append("PLATFORM must be one of " + ", ".join(PLATFORM_CHOICES))
 
         if problems:
             raise ConfigError("; ".join(problems))
@@ -225,34 +241,35 @@ class VcKeeper(discord.Client):
         http = self.http
         session = http._HTTPClient__asession  # type: ignore
         platform = (self.config.platform or "windows").lower()
+        platform = PLATFORM_ALIASES.get(platform, platform)
+
         try:
             if platform == "windows":
                 return await discord.HeadersContext.desktop(session)
-            if platform == "mac":
-                data = await discord.HeadersContext.fetch_api_properties(session, "mac")
+            if platform in {"mac", "linux"}:
+                data = await discord.HeadersContext.fetch_api_properties(session, platform)
                 bv = int(data["metadata"]["native_chrome_version"].split(".")[0])
                 return discord.HeadersContext(
-                    platform="macOS",
+                    platform="macOS" if platform == "mac" else "Linux",
                     browser_type="electron",
                     browser_major_version=bv,
                     super_properties=data["properties"],
                     encoded_super_properties=data.get("encoded"),
                     extra_gateway_properties=data.get("extra_gateway_properties"),
                 )
-            if platform == "linux":
-                data = await discord.HeadersContext.fetch_api_properties(session, "linux")
-                bv = int(data["metadata"]["native_chrome_version"].split(".")[0])
-                return discord.HeadersContext(
-                    platform="Linux",
-                    browser_type="electron",
-                    browser_major_version=bv,
-                    super_properties=data["properties"],
-                    encoded_super_properties=data.get("encoded"),
-                    extra_gateway_properties=data.get("extra_gateway_properties"),
-                )
+            context = await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
         except Exception as exc:
             log.warning("platform spoof failed, falling back to default: %s", exc)
-        return await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
+            return await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
+
+        browser = SPOOFED_BROWSERS.get(platform)
+        if browser is not None:
+            # Same trick as Equicord's PlatformSpoofer: the gateway IDENTIFY
+            # properties' `browser` field is what Discord turns into a session's
+            # client + os, so overriding it reports us as that platform.
+            context.extra_gateway_properties = {**context.extra_gateway_properties, "browser": browser}
+        log.info("spoofing platform %s%s", platform, f" (identify browser {browser!r})" if browser else "")
+        return context
 
     async def _update_presence(self) -> None:
         status_map = {
