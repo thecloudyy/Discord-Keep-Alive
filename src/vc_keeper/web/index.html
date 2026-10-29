@@ -259,17 +259,25 @@
             if (rank[status] < rank[entry.status]) entry.status = status;
             if (s.os && s.os !== 'unknown' && !entry.os.includes(s.os)) entry.os.push(s.os);
           }
+          // `os` is only meaningful where the platform implies one; Discord fills
+          // it with the header context's OS otherwise.
+          const osList = (client, list) => {
+            if (client === 'embedded' || client === 'vr') return [];
+            if (client === 'mobile') return list.filter((o) => o === 'ios' || o === 'android');
+            return list;
+          };
           const chips = order.filter((k) => merged[k]).map((k) => {
             const meta = this.platformMeta[k];
             const entry = merged[k];
             const badge = entry.status === 'invisible' ? 'offline' : entry.status;
+            const os = osList(k, entry.os);
             return {
               key: k,
               label: meta.label,
               paths: meta.paths,
               online: true,
               color: colours[entry.status] || '#80848e',
-              title: `${meta.tooltip}${entry.os.length ? ' · ' + entry.os.join(', ') : ''} · ${badge}`,
+              title: `${meta.tooltip}${os.length ? ' · ' + os.join(', ') : ''} · ${badge}`,
             };
           });
           if (chips.length) return chips;

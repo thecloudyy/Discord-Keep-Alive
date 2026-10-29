@@ -78,7 +78,8 @@ REJOIN_COOLDOWN_MAX=120
 
 Desktop values send a matching desktop client identity. The rest override the `browser` entry of
 the gateway IDENTIFY payload (the same mechanism Equicord's PlatformSpoofer uses), which is what
-Discord turns into a session's client and OS. Changes apply on the next login; Xbox,
+Discord turns into a session's client type; Android and iOS also send `os` so the session is
+reported as `mobile` on the right OS. Changes apply on the next login; Xbox,
 PlayStation and VR can make your client look out of date.
 
 The header of the UI shows one status-coloured icon per platform the account is actually online

@@ -80,12 +80,12 @@ STATE_FILE = _root() / ".vc-keeper.state.json"
 # client/os.
 PLATFORM_CHOICES = ("windows", "mac", "linux", "web", "android", "ios", "xbox", "playstation", "vr")
 PLATFORM_ALIASES = {"desktop": "windows", "macos": "mac", "mobile": "ios"}
-SPOOFED_BROWSERS = {
-    "android": "Discord Android",
-    "ios": "Discord iOS",
-    "xbox": "Discord Embedded",
-    "playstation": "Discord Embedded",
-    "vr": "Discord VR",
+SPOOFED_PROPERTIES: dict[str, dict[str, str]] = {
+    "android": {"browser": "Discord Android", "os": "Android"},
+    "ios": {"browser": "Discord iOS", "os": "iOS"},
+    "xbox": {"browser": "Discord Embedded"},
+    "playstation": {"browser": "Discord Embedded"},
+    "vr": {"browser": "Discord VR"},
 }
 
 
@@ -262,13 +262,13 @@ class VcKeeper(discord.Client):
             log.warning("platform spoof failed, falling back to default: %s", exc)
             return await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
 
-        browser = SPOOFED_BROWSERS.get(platform)
-        if browser is not None:
-            # Same trick as Equicord's PlatformSpoofer: the gateway IDENTIFY
-            # properties' `browser` field is what Discord turns into a session's
-            # client + os, so overriding it reports us as that platform.
-            context.extra_gateway_properties = {**context.extra_gateway_properties, "browser": browser}
-        log.info("spoofing platform %s%s", platform, f" (identify browser {browser!r})" if browser else "")
+        overrides = SPOOFED_PROPERTIES.get(platform)
+        if overrides:
+            # Same trick as Equicord's PlatformSpoofer: the `browser` entry of the
+            # gateway IDENTIFY properties is what Discord turns into a session's
+            # client type, and `os` is what it reports as the session's OS.
+            context.extra_gateway_properties = {**context.extra_gateway_properties, **overrides}
+        log.info("spoofing platform %s%s", platform, f" (identify {overrides})" if overrides else "")
         return context
 
     async def _update_presence(self) -> None:
