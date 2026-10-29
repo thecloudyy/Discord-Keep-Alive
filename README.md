@@ -99,6 +99,19 @@ on, merged from Discord's session list the way Vencord's PlatformIndicators does
 
 Or use the UI's auto-detect (Windows).
 
+## Layout
+
+```
+src/vc_keeper/app.py        the bot: config, gateway identity, voice keeper, live state
+src/vc_keeper/ui.py         local web server: page, REST endpoints, SSE event hub
+src/vc_keeper/envfile.py    shared .env reading/writing and app directory
+src/vc_keeper/token_detect.py  token discovery from local Discord profiles (Windows)
+src/vc_keeper/web/index.html   the dashboard (Vue 3 + Tailwind, from a CDN)
+launcher_ui.py, *.spec      PyInstaller entry point and build recipe
+install.py, *.bat           source install and start helpers
+deploy/vc-keeper.service    systemd unit for source installs on Linux
+```
+
 ## Credits
 
 Inspired by:

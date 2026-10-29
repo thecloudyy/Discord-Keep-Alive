@@ -1,4 +1,4 @@
-"""Lightweight local web UI for vc-keeper."""
+"""Local web UI for vc-keeper: a static page plus a live event stream."""
 
 from __future__ import annotations
 
@@ -9,29 +9,33 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-if getattr(sys, "frozen", False):
-    ROOT = Path(sys.executable).resolve().parent
-else:
-    ROOT = Path(__file__).resolve().parent.parent.parent
+from .envfile import app_dir, read as read_env, write as write_env
+
+ROOT = app_dir()
 WEB_DIR = Path(__file__).resolve().parent / "web"
+ENV_FILE = ROOT / ".env"
 LOG_FILE = ROOT / ".vc-keeper.log"
 STATE_FILE = ROOT / ".vc-keeper.state.json"
+
 STATE_FRESH_S = 60.0
+EVENT_LOG_LINES = 300
+EVENT_TICK_S = 0.4
 
 _proc: subprocess.Popen | None = None
 _proc_lock = threading.Lock()
 
-EVENT_LOG_LINES = 300
-EVENT_TICK_S = 0.4
-
 _subscribers: set[queue.Queue] = set()
 _sub_lock = threading.Lock()
 _hub_started = False
+
+
+# ------------------------------------------------------------------ bot process
 
 
 def _proc_running() -> bool:
@@ -39,38 +43,112 @@ def _proc_running() -> bool:
         return _proc is not None and _proc.poll() is None
 
 
-def _mtime(path: Path) -> int | None:
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return None
+def _venv_python() -> str:
+    candidates = (".venv/Scripts/python.exe", ".venv/bin/python")
+    for name in candidates:
+        path = ROOT / name
+        if path.is_file():
+            return str(path)
+    return sys.executable
 
 
-def _size(path: Path) -> int:
+def _start_bot() -> bool:
+    """Start the bot; False when it is already running."""
+    global _proc
+    with _proc_lock:
+        if _proc is not None and _proc.poll() is None:
+            return False
+        LOG_FILE.write_text("", encoding="utf-8")
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--run-bot"]
+        else:
+            cmd = [_venv_python(), "-m", "vc_keeper"]
+        with LOG_FILE.open("a", encoding="utf-8") as out:
+            _proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT)
+    _broadcast({"type": "status", "running": True})
+    return True
+
+
+def _stop_bot() -> None:
+    global _proc
+    with _proc_lock:
+        proc, _proc = _proc, None
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _broadcast({"type": "status", "running": False})
+
+
+# ------------------------------------------------------------------ config/state
+
+
+def _config() -> dict[str, str]:
+    return read_env(ENV_FILE) if ENV_FILE.is_file() else {}
+
+
+def _read_state(running: bool) -> dict:
+    """Live state published by the bot: the platforms the account is online on."""
+    if not running or not STATE_FILE.is_file():
+        return {}
     try:
-        return path.stat().st_size
-    except OSError:
-        return 0
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        age = time.time() - float(data.get("updated_at", 0))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return {} if age > STATE_FRESH_S else data
+
+
+def _tail_log(n: int) -> str:
+    if not LOG_FILE.is_file():
+        return ""
+    lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-n:])
+
+
+def _profile(token: str, size: int) -> dict:
+    request = urllib.request.Request(
+        "https://discord.com/api/v9/users/@me",
+        headers={"Authorization": token, "User-Agent": "vc-keeper"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        user = json.loads(response.read().decode("utf-8"))
+    avatar = user.get("avatar")
+    if avatar:
+        avatar_url = f"https://cdn.discordapp.com/avatars/{user['id']}/{avatar}.png?size={size}"
+    else:
+        avatar_url = f"https://cdn.discordapp.com/embed/avatars/{int(user.get('discriminator') or 0) % 5}.png"
+    return {
+        "id": user.get("id"),
+        "username": user.get("username"),
+        "global_name": user.get("global_name"),
+        "avatar_url": avatar_url,
+    }
+
+
+# ------------------------------------------------------------------ event stream
 
 
 def _subscribe() -> queue.Queue:
-    q: queue.Queue = queue.Queue(maxsize=2000)
+    inbox: queue.Queue = queue.Queue(maxsize=2000)
     with _sub_lock:
-        _subscribers.add(q)
-    return q
+        _subscribers.add(inbox)
+    return inbox
 
 
-def _unsubscribe(q: queue.Queue) -> None:
+def _unsubscribe(inbox: queue.Queue) -> None:
     with _sub_lock:
-        _subscribers.discard(q)
+        _subscribers.discard(inbox)
 
 
 def _broadcast(event: dict) -> None:
     with _sub_lock:
         targets = list(_subscribers)
-    for q in targets:
+    for inbox in targets:
         try:
-            q.put_nowait(event)
+            inbox.put_nowait(event)
         except queue.Full:
             pass
 
@@ -85,24 +163,27 @@ def _start_hub() -> None:
 
 
 def _hub_loop() -> None:
-    """Watch the bot's log, state file and process, and push changes to the UI."""
-    offset = _size(LOG_FILE)  # history is sent in the snapshot instead
+    """Watch the bot's log, state file and process, and push changes to the page."""
+    offset = _size(LOG_FILE)  # history goes in the snapshot instead
     state_mtime = _mtime(STATE_FILE)
     running = _proc_running()
+
     while True:
         time.sleep(EVENT_TICK_S)
 
         size = _size(LOG_FILE)
         if size < offset:
-            offset = 0  # the log was truncated by a fresh start
+            # A fresh start truncated the log, so the page should forget the old run.
+            offset = 0
+            _broadcast({"type": "log_reset"})
         if size > offset:
             try:
-                with LOG_FILE.open("rb") as f:
-                    f.seek(offset)
-                    chunk = f.read()
+                with LOG_FILE.open("rb") as log:
+                    log.seek(offset)
+                    chunk = log.read()
             except OSError:
                 chunk = b""
-            cut = chunk.rfind(b"\n")
+            cut = chunk.rfind(b"\n")  # only emit complete lines
             if cut != -1:
                 data = chunk[: cut + 1]
                 offset += len(data)
@@ -110,9 +191,9 @@ def _hub_loop() -> None:
                 if lines:
                     _broadcast({"type": "log", "lines": lines})
 
-        current = _mtime(STATE_FILE)
-        if current != state_mtime:
-            state_mtime = current
+        current_mtime = _mtime(STATE_FILE)
+        if current_mtime != state_mtime:
+            state_mtime = current_mtime
             state = _read_state(True)
             if state:
                 _broadcast({"type": "state", "data": state})
@@ -136,62 +217,21 @@ def _snapshot() -> dict:
     }
 
 
-def _read_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    env_path = ROOT / ".env"
-    if env_path.is_file():
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            env[k.strip()] = v.strip()
-    return env
-
-
-def _write_env(data: dict[str, str]) -> None:
-    order = [
-        "DISCORD_TOKEN", "DISCORD_GUILD_ID", "DISCORD_CHANNEL_ID", "LOG_LEVEL",
-        "SELF_DEAF", "STATUS", "ACTIVITY_TYPE", "ACTIVITY_TEXT", "CUSTOM_STATUS",
-        "PLATFORM", "REJOIN_COOLDOWN_MIN", "REJOIN_COOLDOWN_MAX",
-    ]
-    lines = []
-    for k in order:
-        if k in data:
-            lines.append(f"{k}={data[k]}")
-    for k, v in data.items():
-        if k not in order:
-            lines.append(f"{k}={v}")
-    (ROOT / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _venv_python() -> str:
-    if os.name == "nt":
-        cand = ROOT / ".venv" / "Scripts" / "python.exe"
-    else:
-        cand = ROOT / ".venv" / "bin" / "python"
-    return str(cand if cand.is_file() else sys.executable)
-
-
-def _read_state(running: bool) -> dict:
-    """Live state published by the bot: the platforms the account is online on."""
-    if not running or not STATE_FILE.is_file():
-        return {}
+def _mtime(path: Path) -> int | None:
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        age = time.time() - float(data.get("updated_at", 0))
-    except (OSError, ValueError, TypeError):
-        return {}
-    if age > STATE_FRESH_S:
-        return {}
-    return data
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
-def _tail_log(n: int = 80) -> str:
-    if not LOG_FILE.is_file():
-        return ""
-    lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[-n:])
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+# ------------------------------------------------------------------ HTTP handler
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -203,28 +243,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_file(self, path: Path) -> None:
-        if not path.is_file():
+    def _serve_index(self) -> None:
+        index = WEB_DIR / "index.html"
+        if not index.is_file():
             self.send_error(404)
             return
-        data = path.read_bytes()
-        ctype = "text/html; charset=utf-8"
-        if path.suffix == ".js":
-            ctype = "application/javascript"
-        elif path.suffix == ".css":
-            ctype = "text/css"
+        body = index.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(body)
 
     def _write_event(self, payload: dict) -> None:
         self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
     def _stream_events(self) -> None:
-        """Keep the page live: snapshot on connect, then pushed updates."""
+        """Keep the page live: a snapshot on connect, then pushed updates."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store")
@@ -247,143 +283,70 @@ class Handler(BaseHTTPRequestHandler):
             _unsubscribe(inbox)
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if path == "/" or path == "/index.html":
-            self._serve_file(WEB_DIR / "index.html")
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            self._serve_index()
             return
         if path == "/api/events":
             self._stream_events()
             return
-        if path == "/api/tokens":
-            try:
-                from .token_detect import detect_tokens
-                toks = detect_tokens()
-                out = []
-                for t in toks:
-                    profile = {}
-                    try:
-                        import urllib.request
-                        req = urllib.request.Request(
-                            "https://discord.com/api/v9/users/@me",
-                            headers={"Authorization": t.token, "User-Agent": "vc-keeper"},
-                        )
-                        with urllib.request.urlopen(req, timeout=10) as resp:
-                            data = json.loads(resp.read().decode("utf-8"))
-                        avatar = data.get("avatar")
-                        if avatar:
-                            avatar_url = f"https://cdn.discordapp.com/avatars/{data['id']}/{avatar}.png?size=64"
-                        else:
-                            avatar_url = f"https://cdn.discordapp.com/embed/avatars/{int(data.get('discriminator','0')) % 5}.png"
-                        profile = {
-                            "username": data.get("username"),
-                            "global_name": data.get("global_name"),
-                            "avatar_url": avatar_url,
-                            "id": data.get("id"),
-                        }
-                    except Exception:
-                        pass
-                    out.append({"client": t.client, "token": t.token, **profile})
-                self._json(200, out)
-            except Exception as exc:
-                self._json(500, {"error": str(exc)})
-            return
         if path == "/api/config":
-            self._json(200, _read_env())
+            self._json(200, _config())
             return
         if path == "/api/profile":
-            env = _read_env()
-            token = env.get("DISCORD_TOKEN", "")
+            token = _config().get("DISCORD_TOKEN", "")
             if not token:
                 self._json(200, {})
                 return
             try:
-                import urllib.request
-                req = urllib.request.Request(
-                    "https://discord.com/api/v9/users/@me",
-                    headers={"Authorization": token, "User-Agent": "vc-keeper"},
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                avatar = data.get("avatar")
-                if avatar:
-                    avatar_url = f"https://cdn.discordapp.com/avatars/{data['id']}/{avatar}.png?size=128"
-                else:
-                    avatar_url = f"https://cdn.discordapp.com/embed/avatars/{int(data.get('discriminator','0')) % 5}.png"
-                self._json(200, {
-                    "id": data.get("id"),
-                    "username": data.get("username"),
-                    "global_name": data.get("global_name"),
-                    "avatar_url": avatar_url,
-                })
+                self._json(200, _profile(token, 128))
             except Exception as exc:
                 self._json(200, {"error": str(exc)})
             return
-        if path == "/api/status":
-            running = _proc_running()
-            state = _read_state(running)
-            self._json(200, {
-                "running": running,
-                "log": _tail_log(),
-                "sessions": state.get("sessions", []),
-                "user": state.get("user"),
-                "spoofed_platform": state.get("spoofed_platform"),
-            })
+        if path == "/api/tokens":
+            # Imported lazily: token_detect uses Windows-only APIs.
+            from .token_detect import detect_tokens
+
+            found = []
+            for token in detect_tokens():
+                entry = {"client": token.client, "token": token.token}
+                try:
+                    entry.update(_profile(token.token, 64))
+                except Exception:
+                    pass
+                found.append(entry)
+            self._json(200, found)
             return
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
-        global _proc
-        parsed = urlparse(self.path)
-        path = parsed.path
+        path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b""
         try:
             data = json.loads(raw.decode("utf-8")) if raw else {}
-        except Exception:
+        except ValueError:
             data = {}
 
         if path == "/api/config":
-            _write_env({str(k): str(v) for k, v in data.items()})
+            write_env(ENV_FILE, {str(key): str(value) for key, value in data.items()})
             self._json(200, {"ok": True})
             return
         if path == "/api/start":
-            with _proc_lock:
-                if _proc is not None and _proc.poll() is None:
-                    self._json(200, {"ok": True, "message": "already running"})
-                    return
-                # write log fresh
-                LOG_FILE.write_text("", encoding="utf-8")
-                if getattr(sys, "frozen", False):
-                    cmd = [sys.executable, "--run-bot"]
-                else:
-                    cmd = [_venv_python(), "-m", "vc_keeper"]
-                f = open(LOG_FILE, "a", encoding="utf-8")
-                _proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=f, stderr=subprocess.STDOUT)
-            _broadcast({"type": "status", "running": True})
-            self._json(200, {"ok": True})
+            started = _start_bot()
+            self._json(200, {"ok": True, "message": "" if started else "already running"})
             return
         if path == "/api/stop":
-            with _proc_lock:
-                if _proc is not None and _proc.poll() is None:
-                    _proc.terminate()
-                    try:
-                        _proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _proc.kill()
-                _proc = None
-            _broadcast({"type": "status", "running": False})
+            _stop_bot()
+            self._json(200, {"ok": True})
+            return
+        if path == "/api/restart":
+            _stop_bot()
+            _start_bot()
             self._json(200, {"ok": True})
             return
         if path == "/api/terminate":
-            with _proc_lock:
-                if _proc is not None and _proc.poll() is None:
-                    _proc.terminate()
-                    try:
-                        _proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        _proc.kill()
-                _proc = None
+            _stop_bot()
             self._json(200, {"ok": True})
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return
@@ -394,9 +357,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    WEB_DIR.mkdir(parents=True, exist_ok=True)
-    if not (WEB_DIR / "index.html").is_file():
-        (WEB_DIR / "index.html").write_text(_FALLBACK_HTML, encoding="utf-8")
     httpd = ThreadingHTTPServer((host, port), Handler)
     _start_hub()
     url = f"http://{host}:{port}"
@@ -411,12 +371,10 @@ def run(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) ->
         httpd.server_close()
 
 
-_FALLBACK_HTML = """<!doctype html><html><body><h1>vc-keeper UI</h1><p>Missing index.html</p></body></html>"""
-
-
 def main() -> None:
     if "--run-bot" in sys.argv:
         from .app import main as app_main
+
         app_main()
         return
     run()

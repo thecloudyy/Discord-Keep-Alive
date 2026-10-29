@@ -134,7 +134,7 @@
       <div class="flex gap-3 flex-wrap">
         <button @click="save" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded">Save config</button>
         <button v-if="!running" @click="start" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded">Start</button>
-        <button v-else @click="update" class="bg-amber-600 hover:bg-amber-500 px-4 py-2 rounded">Update</button>
+        <button v-else @click="restart" class="bg-amber-600 hover:bg-amber-500 px-4 py-2 rounded">Restart</button>
         <button @click="stop" class="bg-rose-600 hover:bg-rose-500 px-4 py-2 rounded">Stop</button>
         <button @click="terminate" class="bg-red-700 hover:bg-red-600 px-4 py-2 rounded">Terminate</button>
         <button @click="switchAccount" class="bg-slate-600 hover:bg-slate-500 px-4 py-2 rounded">Switch account</button>
@@ -322,6 +322,8 @@
               const lines = (this.log ? this.log.split('\n') : []).concat(d.lines || []);
               this.log = lines.slice(-300).join('\n');
               this.scrollLog();
+            } else if (d.type === 'log_reset') {
+              this.log = '';
             } else if (d.type === 'state') {
               this.sessions = d.data.sessions || [];
             } else if (d.type === 'status') {
@@ -381,44 +383,23 @@
         },
         async start() {
           await this.save();
-          const r = await fetch('/api/start', { method: 'POST' });
-          const d = await r.json();
+          const d = await (await fetch('/api/start', { method: 'POST' })).json();
           this.msg = d.message || 'started';
-          await this.poll();
         },
         async stop() {
           await fetch('/api/stop', { method: 'POST' });
           this.msg = 'stopped';
-          await this.poll();
         },
-        async update() {
-          this.msg = 'updating...';
+        async restart() {
+          this.msg = 'restarting…';
           await this.save();
-          await fetch('/api/stop', { method: 'POST' });
-          for (let i = 0; i < 20; i++) {
-            await this.poll();
-            if (!this.running) break;
-            await new Promise(r => setTimeout(r, 250));
-          }
-          await fetch('/api/start', { method: 'POST' });
-          for (let i = 0; i < 20; i++) {
-            await this.poll();
-            if (this.running) break;
-            await new Promise(r => setTimeout(r, 250));
-          }
-          this.msg = 'updated';
+          await fetch('/api/restart', { method: 'POST' });
+          this.msg = 'restarted';
         },
         async terminate() {
           await fetch('/api/terminate', { method: 'POST' });
           this.msg = 'terminated';
           window.close();
-        },
-        async poll() {
-          const r = await fetch('/api/status');
-          const d = await r.json();
-          this.running = d.running;
-          this.sessions = d.running ? (d.sessions || []) : [];
-          this.log = d.log;
         },
       },
     }).mount('#app');

@@ -1,19 +1,5 @@
 from __future__ import annotations
 
-import os
-import sys
-
-if getattr(sys, "frozen", False):
-    _base = getattr(sys, "_MEIPASS", "")
-    _dirs = [_base, os.path.join(_base, "curl_cffi.libs")]
-    for _d in _dirs:
-        if _d and os.path.isdir(_d):
-            try:
-                os.add_dll_directory(_d)
-            except (AttributeError, OSError):
-                pass
-            os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
-
 import asyncio
 import json
 import logging
@@ -23,37 +9,26 @@ import re
 import signal
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
+if getattr(sys, "frozen", False):
+    # The onefile bundle unpacks curl_cffi's DLLs next to itself.
+    _base = getattr(sys, "_MEIPASS", "")
+    for _dir in (_base, os.path.join(_base, "curl_cffi.libs")):
+        if _dir and os.path.isdir(_dir):
+            try:
+                os.add_dll_directory(_dir)
+            except (AttributeError, OSError):
+                pass
+            os.environ["PATH"] = _dir + os.pathsep + os.environ.get("PATH", "")
 
-def find_env_file() -> Path | None:
-    """The .env in use: cwd first, then the project root, then the package."""
-    for path in (
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parent.parent.parent / ".env",
-        Path(__file__).resolve().parent / ".env",
-    ):
-        if path.is_file():
-            return path
-    return None
 
+import discord
 
-def read_dotenv(path: Path) -> dict[str, str]:
-    data: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        if key:
-            data[key] = value
-    return data
+from .envfile import app_dir, env_path, read as read_env
 
 
 def _mtime(path: Path | None) -> int | None:
@@ -66,14 +41,12 @@ def _mtime(path: Path | None) -> int | None:
 
 
 def _load_dotenv() -> None:
-    """Load a .env file from the cwd or project root into os.environ."""
-    path = find_env_file()
+    """Fill os.environ from .env, without overriding variables already set."""
+    path = env_path()
     if path is None:
         return
-    for key, value in read_dotenv(path).items():
+    for key, value in read_env(path).items():
         os.environ.setdefault(key, value)
-
-import discord
 
 log = logging.getLogger("vc_keeper")
 
@@ -88,14 +61,7 @@ STATE_PUBLISH_S = 5.0
 CONFIG_POLL_S = 1.0
 SNOWFLAKE = re.compile(r"^\d{16,22}$")
 
-
-def _root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent.parent
-
-
-STATE_FILE = _root() / ".vc-keeper.state.json"
+STATE_FILE = app_dir() / ".vc-keeper.state.json"
 
 # Which platform to pretend to be. Desktop variants are spoofed with a full
 # desktop client identity; the rest are spoofed the same way Equicord's
@@ -112,12 +78,60 @@ SPOOFED_PROPERTIES: dict[str, dict[str, str]] = {
     "vr": {"browser": "Discord VR"},
 }
 
+# Desktop flavours fetched from Discord's client-info API, and the platform name
+# each one reports.
+ELECTRON_PLATFORMS = {"mac": "macOS", "linux": "Linux"}
+
+ACTIVITY_FACTORIES: dict[str, Callable[[str], discord.BaseActivity]] = {
+    "playing": lambda text: discord.Game(name=text),
+    "listening": lambda text: discord.Activity(type=discord.ActivityType.listening, name=text),
+    "watching": lambda text: discord.Activity(type=discord.ActivityType.watching, name=text),
+    "competing": lambda text: discord.Activity(type=discord.ActivityType.competing, name=text),
+    "custom": lambda text: discord.CustomActivity(name=text),
+}
+
+
+async def _electron_context(session: Any, flavour: str) -> discord.HeadersContext:
+    """A full Electron desktop-client identity for macOS or Linux."""
+    data = await discord.HeadersContext.fetch_api_properties(session, flavour)
+    major = int(data["metadata"]["native_chrome_version"].split(".")[0])
+    return discord.HeadersContext(
+        platform=ELECTRON_PLATFORMS[flavour],
+        browser_type="electron",
+        browser_major_version=major,
+        super_properties=data["properties"],
+        encoded_super_properties=data.get("encoded"),
+        extra_gateway_properties=data.get("extra_gateway_properties"),
+    )
+
 
 # --------------------------------------------------------------------------- config
 
 
 class ConfigError(Exception):
     pass
+
+
+def _read_id(env: Mapping[str, str], name: str, problems: list[str]) -> int:
+    raw = env.get(name, "").strip()
+    if not SNOWFLAKE.fullmatch(raw):
+        problems.append(f"{name} must be a Discord ID (16-22 digits)")
+        return 0
+    return int(raw)
+
+
+def _read_seconds(env: Mapping[str, str], name: str, default: float, problems: list[str]) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        problems.append(f"{name} must be a number of seconds")
+        return default
+    if value < 0:
+        problems.append(f"{name} can't be negative")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,30 +161,10 @@ class Config:
         if not token:
             problems.append("DISCORD_TOKEN is missing")
 
-        def snowflake(name: str) -> int:
-            raw = env.get(name, "").strip()
-            if not SNOWFLAKE.fullmatch(raw):
-                problems.append(f"{name} must be a Discord ID (16-22 digits)")
-                return 0
-            return int(raw)
-
-        def seconds(name: str, default: float) -> float:
-            raw = env.get(name, "").strip()
-            if not raw:
-                return default
-            try:
-                value = float(raw)
-            except ValueError:
-                problems.append(f"{name} must be a number of seconds")
-                return default
-            if value < 0:
-                problems.append(f"{name} can't be negative")
-            return value
-
-        guild_id = snowflake("DISCORD_GUILD_ID")
-        channel_id = snowflake("DISCORD_CHANNEL_ID")
-        cooldown_min = seconds("REJOIN_COOLDOWN_MIN", 10)
-        cooldown_max = seconds("REJOIN_COOLDOWN_MAX", 120)
+        guild_id = _read_id(env, "DISCORD_GUILD_ID", problems)
+        channel_id = _read_id(env, "DISCORD_CHANNEL_ID", problems)
+        cooldown_min = _read_seconds(env, "REJOIN_COOLDOWN_MIN", 10, problems)
+        cooldown_max = _read_seconds(env, "REJOIN_COOLDOWN_MAX", 120, problems)
         if cooldown_max < cooldown_min:
             problems.append("REJOIN_COOLDOWN_MAX must be >= REJOIN_COOLDOWN_MIN")
 
@@ -274,23 +268,14 @@ class VcKeeper(discord.Client):
     async def headers_context(self) -> discord.HeadersContext:
         http = self.http
         session = http._HTTPClient__asession  # type: ignore
-        platform = (self.config.platform or "windows").lower()
-        platform = PLATFORM_ALIASES.get(platform, platform)
+        configured = (self.config.platform or "windows").lower()
+        platform = PLATFORM_ALIASES.get(configured, configured)
 
         try:
             if platform == "windows":
                 return await discord.HeadersContext.desktop(session)
-            if platform in {"mac", "linux"}:
-                data = await discord.HeadersContext.fetch_api_properties(session, platform)
-                bv = int(data["metadata"]["native_chrome_version"].split(".")[0])
-                return discord.HeadersContext(
-                    platform="macOS" if platform == "mac" else "Linux",
-                    browser_type="electron",
-                    browser_major_version=bv,
-                    super_properties=data["properties"],
-                    encoded_super_properties=data.get("encoded"),
-                    extra_gateway_properties=data.get("extra_gateway_properties"),
-                )
+            if platform in ELECTRON_PLATFORMS:
+                return await _electron_context(session, platform)
             context = await discord.HeadersContext.default(session, http.proxy, http.proxy_auth)
         except Exception as exc:
             log.warning("platform spoof failed, falling back to default: %s", exc)
@@ -314,20 +299,14 @@ class VcKeeper(discord.Client):
         }
         status = status_map.get(self.config.status, discord.Status.online)
 
+        config = self.config
         activity = None
-        if self.config.activity_type and self.config.activity_text:
-            if self.config.activity_type == "playing":
-                activity = discord.Game(name=self.config.activity_text)
-            elif self.config.activity_type == "listening":
-                activity = discord.Activity(type=discord.ActivityType.listening, name=self.config.activity_text)
-            elif self.config.activity_type == "watching":
-                activity = discord.Activity(type=discord.ActivityType.watching, name=self.config.activity_text)
-            elif self.config.activity_type == "competing":
-                activity = discord.Activity(type=discord.ActivityType.competing, name=self.config.activity_text)
-            elif self.config.activity_type == "custom":
-                activity = discord.CustomActivity(name=self.config.activity_text or self.config.custom_status)
-        if activity is None and self.config.custom_status:
-            activity = discord.CustomActivity(name=self.config.custom_status)
+        if config.activity_type and config.activity_text:
+            factory = ACTIVITY_FACTORIES.get(config.activity_type)
+            if factory is not None:
+                activity = factory(config.activity_text)
+        if activity is None and config.custom_status:
+            activity = discord.CustomActivity(name=config.custom_status)
 
         try:
             await self.change_presence(status=status, activity=activity)
@@ -358,12 +337,12 @@ class VcKeeper(discord.Client):
 
     async def _watch_config(self) -> None:
         """Apply .env edits to the running bot, without a restart."""
-        path = find_env_file()
+        path = env_path()
         last = _mtime(path)
         while not self.is_closed():
             await asyncio.sleep(CONFIG_POLL_S)
             if path is None:
-                path = find_env_file()
+                path = env_path()
                 if path is not None:
                     last = _mtime(path)
                 continue
@@ -372,7 +351,7 @@ class VcKeeper(discord.Client):
                 continue
             last = current
             try:
-                config = Config.from_mapping(read_dotenv(path))
+                config = Config.from_mapping(read_env(path))
             except ConfigError as exc:
                 log.warning("config change ignored: %s", exc)
                 continue
@@ -409,10 +388,10 @@ class VcKeeper(discord.Client):
 
         needs_restart = [
             name
-            for changed, name in (
-                (config.token != old.token, "token"),
-                (config.platform != old.platform, "platform"),
-                (config.self_deaf != old.self_deaf, "self-deafen"),
+            for name, changed in (
+                ("token", config.token != old.token),
+                ("platform", config.platform != old.platform),
+                ("self-deafen", config.self_deaf != old.self_deaf),
             )
             if changed
         ]
