@@ -140,7 +140,6 @@ Inspired by:
 - wtfrj/Online-account-24-7
 - snipcola/Discord-Keep-Alive
 - Masterain98/discord-quest-helper (UI library & token detection)
-- thecloudyy/Discord-Keep-Alive
 
 ## License
 
