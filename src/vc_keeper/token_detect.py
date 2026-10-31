@@ -11,7 +11,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 # Windows BCrypt for AES-256-GCM decryption (no external deps).
-bcrypt = ctypes.windll.bcrypt
+bcrypt = ctypes.windll.bcrypt if os.name == "nt" else None
 
 
 class _DATA_BLOB(ctypes.Structure):
@@ -19,6 +19,8 @@ class _DATA_BLOB(ctypes.Structure):
 
 
 def _unprotect(data: bytes) -> bytes | None:
+    if os.name != "nt":
+        return None
     blob_in = _DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_char)))
     blob_out = _DATA_BLOB()
     ok = ctypes.windll.crypt32.CryptUnprotectData(
@@ -56,6 +58,8 @@ class _BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO(ctypes.Structure):
 
 
 def _bcrypt_aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> bytes | None:
+    if bcrypt is None:
+        return None
     h_alg = wintypes.HANDLE()
     if bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(h_alg), BCRYPT_AES_ALGORITHM, None, 0) != 0:
         return None

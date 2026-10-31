@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parent
 VENV = ROOT / ".venv"
 ENV_FILE = ROOT / ".env"
 
-# httpx (used by the Rust toolchain downloader) chokes on IPv6 CIDR entries in
-# NO_PROXY, so sanitize it for the install subprocesses.
+# pip/httpx choke on IPv6 CIDR entries in NO_PROXY, so sanitize it for the
+# install subprocesses.
 INSTALL_ENV = os.environ.copy()
 INSTALL_ENV["NO_PROXY"] = "localhost,127.0.0.1,.local"
 INSTALL_ENV["no_proxy"] = INSTALL_ENV["NO_PROXY"]
@@ -44,12 +44,11 @@ def main() -> int:
     if ENV_FILE.exists():
         try:
             content = ENV_FILE.read_text(encoding="utf-8")
-            if "DISCORD_TOKEN=" not in content or "DISCORD_TOKEN=\n" in content or "DISCORD_TOKEN=\r\n" in content:
+            if "DISCORD_TOKEN=" not in content:
+                needs_setup = True
+            elif "DISCORD_TOKEN=\n" in content or "DISCORD_TOKEN=\r\n" in content:
                 # empty token -> treat as unconfigured
-                if "DISCORD_TOKEN=" in content:
-                    val = content.split("DISCORD_TOKEN=", 1)[1].splitlines()[0].strip()
-                    if not val:
-                        needs_setup = True
+                needs_setup = True
         except OSError:
             needs_setup = True
 
@@ -77,10 +76,11 @@ def main() -> int:
 
     print()
     print("[vc-keeper] install complete.")
+    print("desktop app: pnpm install, then pnpm tauri:dev (or pnpm tauri:build)")
     if os.name == "nt":
-        print("run with: .\\.venv\\Scripts\\vc-keeper.exe")
+        print("headless bot: .\\.venv\\Scripts\\vc-keeper.exe")
     else:
-        print("run with: ./.venv/bin/vc-keeper")
+        print("headless bot: ./.venv/bin/vc-keeper")
     return 0
 
 

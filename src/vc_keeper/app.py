@@ -421,10 +421,12 @@ class VcKeeper(discord.Client):
     def publish_state(self) -> None:
         user = None
         if self.user is not None:
+            avatar = getattr(self.user, "display_avatar", None)
             user = {
                 "id": str(self.user.id),
                 "username": self.user.name,
                 "global_name": getattr(self.user, "global_name", None),
+                "avatar_url": getattr(avatar, "url", None),
             }
         payload = {
             "pid": os.getpid(),

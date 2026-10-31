@@ -12,8 +12,8 @@ Built on discord.py-self. Automating a user account is against Discord's ToS: us
 - Platform spoofer: Windows, macOS, Linux, web, Android, iOS, Xbox, PlayStation or VR
 - Live platform indicators: one status-coloured icon per platform your account is online on, read from Discord's own session list
 - Self-deafen / self-mute support
-- Local web UI (Discord-Keep-Alive.exe) with account auto-detection
-- Live UI: status, log and platform indicators are pushed over Server-Sent Events, no polling
+- Desktop app (Tauri + React) with account auto-detection and live log
+- Live status, log lines and platform indicators pushed from the bot to the app, no polling in the UI
 - Most settings apply to the running bot immediately; token, `PLATFORM` and self-deafen need a restart
 - Token auto-detection from local Discord profiles (Windows)
 - Multi-account selection
@@ -25,31 +25,45 @@ By using this code, you are automating your Discord account. This is against Dis
 
 **DO NOT GIVE YOUR DISCORD TOKEN TO ANYONE.**
 
+## Requirements
+
+- Python 3.12+
+- Node.js 18+ with pnpm (desktop app)
+- Rust toolchain and the Tauri prerequisites (only needed to build the desktop app)
+
 ## Installation
 
-### From release
+1. Install the Python engine:
 
-Download `Discord-Keep-Alive.exe` from releases and run it. The UI will detect your Discord accounts automatically.
+   ```
+   python install.py
+   ```
 
-### From source
+   On Windows you can also double-click `install.bat`. The installer creates a virtual
+   environment, installs the engine, and prompts for your Discord token / guild / channel on
+   first run (saved to `.env`).
+
+2. Install the desktop app dependencies and start it:
+
+   ```
+   pnpm install
+   pnpm tauri:dev
+   ```
+
+   Build an installer with `pnpm tauri:build` (output in `src-tauri/target/release/bundle`).
+
+The app detects your Discord accounts automatically and stores the chosen token in `.env`.
+It spawns the Python engine as a child process, streams its log, and reads the live state it
+publishes (`.vc-keeper.state.json`) to draw the platform indicators.
+
+## Headless / server
 
 ```
-python install.py
+.venv/bin/vc-keeper            # Linux/macOS
+.venv\Scripts\vc-keeper.exe    # Windows
 ```
 
-On Windows you can also double-click `install.bat`.
-
-The installer creates a virtual environment, installs dependencies, and prompts for your Discord token / guild / channel on first run (saved to `.env`).
-
-## Everyday stuff
-
-```
-Discord-Keep-Alive.exe          # web UI (account selection + dashboard)
-```
-
-Status, activity, custom status and the guild/channel target are picked up by the running bot
-within about a second, no restart needed. Token, `PLATFORM` and self-deafen are only read at login,
-so those need **Update** (or a restart). The UI says so in the log when that happens.
+See `deploy/vc-keeper.service` for a systemd unit pointing at the repo's virtualenv.
 
 ## Configuration (.env)
 
@@ -68,6 +82,11 @@ REJOIN_COOLDOWN_MIN=10
 REJOIN_COOLDOWN_MAX=120
 ```
 
+Status, activity, custom status and the guild/channel target are picked up by the running bot
+within about a second, no restart needed. Token, `PLATFORM` and self-deafen are only read at
+login, so those need a restart (the app's **Restart** button). The UI says so in the log when
+that happens.
+
 ## Platforms
 
 `PLATFORM` picks what Discord thinks you are running:
@@ -83,10 +102,10 @@ REJOIN_COOLDOWN_MAX=120
 Desktop values send a matching desktop client identity. The rest override the `browser` entry of
 the gateway IDENTIFY payload (the same mechanism Equicord's PlatformSpoofer uses), which is what
 Discord turns into a session's client type; Android and iOS also send `os` so the session is
-reported as `mobile` on the right OS. Changes apply on the next login; Xbox,
-PlayStation and VR can make your client look out of date.
+reported as `mobile` on the right OS. Changes apply on the next login; Xbox, PlayStation and VR
+can make your client look out of date.
 
-The header of the UI shows one status-coloured icon per platform the account is actually online
+The header of the app shows one status-coloured icon per platform the account is actually online
 on, merged from Discord's session list the way Vencord's PlatformIndicators does it.
 
 ## Obtaining your token
@@ -97,19 +116,21 @@ on, merged from Discord's session list the way Vencord's PlatformIndicators does
 4. Filter by `/api`, click the `science` entry
 5. Under Headers, find `Authorization` — that is your token
 
-Or use the UI's auto-detect (Windows).
+Or use the app's auto-detect (Windows).
 
 ## Layout
 
 ```
-src/vc_keeper/app.py        the bot: config, gateway identity, voice keeper, live state
-src/vc_keeper/ui.py         local web server: page, REST endpoints, SSE event hub
-src/vc_keeper/envfile.py    shared .env reading/writing and app directory
-src/vc_keeper/token_detect.py  token discovery from local Discord profiles (Windows)
-src/vc_keeper/web/index.html   the dashboard (Vue 3 + Tailwind, from a CDN)
-launcher_ui.py, *.spec      PyInstaller entry point and build recipe
-install.py, *.bat           source install and start helpers
-deploy/vc-keeper.service    systemd unit for source installs on Linux
+src/vc_keeper/app.py            the bot: config, gateway identity, voice keeper, live state
+src/vc_keeper/envfile.py        shared .env reading/writing and app directory
+src/vc_keeper/token_detect.py   token discovery from local Discord profiles (Windows)
+src/vc_keeper/profile.py        profile lookup for the account picker
+src/App.tsx, src/AppBody.tsx    React dashboard (Vite + Tailwind)
+src-tauri/src/main.rs           Tauri entry point and window lifecycle
+src-tauri/src/bot.rs            Python process control, log streaming, live state bridge
+src-tauri/capabilities/         window permissions granted to the webview
+install.py, *.bat               source install and start helpers
+deploy/vc-keeper.service        systemd unit for source installs on Linux
 ```
 
 ## Credits

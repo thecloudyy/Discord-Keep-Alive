@@ -12,7 +12,6 @@ dependencies = [
 
 [project.scripts]
 discord-keep-alive = "vc_keeper.app:main"
-discord-keep-alive-ui = "vc_keeper.ui:main"
 
 [dependency-groups]
 dev = ["ruff>=0.12", "pyright>=1.1.400"]

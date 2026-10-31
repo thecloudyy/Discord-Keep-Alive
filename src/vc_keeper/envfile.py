@@ -1,25 +1,9 @@
-"""The local .env file: where it lives, how to read it and how to write it."""
+"""The local .env file: where it lives and how to read it."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-# Written in this order so the file stays readable.
-KEYS = (
-    "DISCORD_TOKEN",
-    "DISCORD_GUILD_ID",
-    "DISCORD_CHANNEL_ID",
-    "LOG_LEVEL",
-    "SELF_DEAF",
-    "STATUS",
-    "ACTIVITY_TYPE",
-    "ACTIVITY_TEXT",
-    "CUSTOM_STATUS",
-    "PLATFORM",
-    "REJOIN_COOLDOWN_MIN",
-    "REJOIN_COOLDOWN_MAX",
-)
 
 
 def app_dir() -> Path:
@@ -50,9 +34,3 @@ def read(path: Path) -> dict[str, str]:
         if key:
             values[key] = value
     return values
-
-
-def write(path: Path, values: dict[str, str]) -> None:
-    ordered = [key for key in KEYS if key in values]
-    ordered += [key for key in values if key not in KEYS]
-    path.write_text("".join(f"{key}={values[key]}\n" for key in ordered), encoding="utf-8")
